@@ -1,4 +1,6 @@
-from flask import request
+import traceback
+
+from flask import request, render_template, make_response
 from flask_restful import Resource
 from werkzeug.security import safe_str_cmp
 from flask_jwt_extended import (
@@ -9,17 +11,23 @@ from flask_jwt_extended import (
     jwt_required,
     get_raw_jwt,
 )
-from marshmallow import ValidationError
+
+from libs.mailgun import MailgunExeption
 from models.user import UserModel
 from blacklist import BLACKLIST
 from schemas.user import UserSchema
 
 USER_ALREADY_EXISTS = "A user with '{}' username already exists."
-USER_CREATED = "User created successfully."
+USER_CREATED = "Account created successfully, an email with activation link has beeen sent to your email address, " \
+               "please check. "
 USER_NOT_FOUND = "User not found."
 USER_DELETED = "User deleted."
 INVALID_CREDENTIALS = "Invalid credentials!"
 USER_LOGGED_OUT = "User <id={}> successfully logged out."
+NOT_CONFIRMED_ERROR = "You have not confirmed registration, please check your email {}."
+USER_CONFIRMED = " User confirmed."
+EMAIL_ALREADY_EXISTS = "A user with email '{}' already exists."
+FAILED_TO_CREATE = "Internal Server Error. Failed to create user."
 
 user_schema = UserSchema()
 
@@ -27,12 +35,22 @@ user_schema = UserSchema()
 class UserRegister(Resource):
     @classmethod
     def post(cls):
-        user = user_schema.load(request.get_json())  # marshmallow returns UserModel Obj instead of dict
+        user_json = request.get_json()
+        user = user_schema.load(user_json)  # marshmallow returns UserModel Obj instead of dict
 
         if UserModel.find_by_username(user.username):
             return {"message": USER_ALREADY_EXISTS.format(user.username)}, 400
-
-        user.save_to_db()
+        if UserModel.find_by_email(user.email):
+            return {"message": EMAIL_ALREADY_EXISTS.format(user.email)}, 400
+        try:
+            user.save_to_db()
+            user.send_confirmation_email()
+        except MailgunExeption as e:
+            user.delete_from_db()
+            return {"message": str(e)}, 500
+        except:
+            traceback.print_exc()
+            return {"message": FAILED_TO_CREATE}, 500
 
         return {"message": USER_CREATED}, 201
 
@@ -63,17 +81,18 @@ class UserLogin(Resource):
     @classmethod
     def post(cls):
         user_json = request.get_json()
-        user_data = user_schema.load(user_json)
-
+        user_data = user_schema.load(user_json, partial=("email",))
+        # partial=("email") - means ignore email if not present
         user = UserModel.find_by_username(user_data.username)
 
         # this is what the `authenticate()` function did in security.py
-        if user and safe_str_cmp(user.password, user_data.username):
-            # identity= is what the identity() function did in security.py—now stored in the JWT
-            access_token = create_access_token(identity=user.id, fresh=True)
-            refresh_token = create_refresh_token(user.id)
-            return {"access_token": access_token, "refresh_token": refresh_token}, 200
-
+        if user and safe_str_cmp(user_data.password, user.password):
+            if user.activated:
+                # identity is what the identity() function did in security.py—now stored in the JWT
+                access_token = create_access_token(identity=user.id, fresh=True)
+                refresh_token = create_refresh_token(user.id)
+                return {"access_token": access_token, "refresh_token": refresh_token}, 200
+            return {'message': NOT_CONFIRMED_ERROR.format(user.username)}, 400
         return {"message": INVALID_CREDENTIALS}, 401
 
 
@@ -94,3 +113,18 @@ class TokenRefresh(Resource):
         current_user = get_jwt_identity()
         new_token = create_access_token(identity=current_user, fresh=False)
         return {"access_token": new_token}, 200
+
+
+class UserConfirm(Resource):
+    @classmethod
+    def get(cls, user_id: int):
+        user = UserModel.find_by_id(user_id)
+        if not user:
+            return {"message": USER_NOT_FOUND}, 404
+
+        user.activated = True
+        user.save_to_db()
+        # return redirect("http://localhost:3000/", code=302)  # redirect if we have a separate web app
+        headers = {"Content-Type": "text/html"}
+        return make_response(render_template("/confirmation_page.html", email=user.username), 200, headers)
+
