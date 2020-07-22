@@ -1,6 +1,6 @@
 import traceback
 
-from flask import request, render_template, make_response
+from flask import request
 from flask_restful import Resource
 from werkzeug.security import safe_str_cmp
 from flask_jwt_extended import (
@@ -12,22 +12,12 @@ from flask_jwt_extended import (
     get_raw_jwt,
 )
 
-from libs.mailgun import MailgunExeption
+from libs.mailgun import MailgunException
 from models.user import UserModel
 from blacklist import BLACKLIST
 from schemas.user import UserSchema
-
-USER_ALREADY_EXISTS = "A user with '{}' username already exists."
-USER_CREATED = "Account created successfully, an email with activation link has beeen sent to your email address, " \
-               "please check. "
-USER_NOT_FOUND = "User not found."
-USER_DELETED = "User deleted."
-INVALID_CREDENTIALS = "Invalid credentials!"
-USER_LOGGED_OUT = "User <id={}> successfully logged out."
-NOT_CONFIRMED_ERROR = "You have not confirmed registration, please check your email {}."
-USER_CONFIRMED = " User confirmed."
-EMAIL_ALREADY_EXISTS = "A user with email '{}' already exists."
-FAILED_TO_CREATE = "Internal Server Error. Failed to create user."
+from models.confirmation import ConfirmationModel
+from libs.strings import gettext
 
 user_schema = UserSchema()
 
@@ -39,20 +29,23 @@ class UserRegister(Resource):
         user = user_schema.load(user_json)  # marshmallow returns UserModel Obj instead of dict
 
         if UserModel.find_by_username(user.username):
-            return {"message": USER_ALREADY_EXISTS.format(user.username)}, 400
+            return {"message": gettext("user_username_exists")}, 400
         if UserModel.find_by_email(user.email):
-            return {"message": EMAIL_ALREADY_EXISTS.format(user.email)}, 400
+            return {"message": gettext("user_email_exists")}, 400
         try:
             user.save_to_db()
+            confirmation = ConfirmationModel(user.id)
+            confirmation.save_to_db()
             user.send_confirmation_email()
-        except MailgunExeption as e:
+        except MailgunException as e:
             user.delete_from_db()
             return {"message": str(e)}, 500
         except:
             traceback.print_exc()
-            return {"message": FAILED_TO_CREATE}, 500
+            user.delete_from_db()
+            return {"message": gettext("user_error_creating")}, 500
 
-        return {"message": USER_CREATED}, 201
+        return {"message": gettext("user_registered")}, 201
 
 
 class User(Resource):
@@ -65,16 +58,16 @@ class User(Resource):
     def get(cls, user_id: int):
         user = UserModel.find_by_id(user_id)
         if not user:
-            return {"message": USER_NOT_FOUND}, 404
+            return {"message": gettext("user_not_found")}, 404
         return user_schema.dump(user), 200
 
     @classmethod
     def delete(cls, user_id: int):
         user = UserModel.find_by_id(user_id)
         if not user:
-            return {"message": USER_NOT_FOUND}, 404
+            return {"message": gettext("user_not_found")}, 404
         user.delete_from_db()
-        return {"message": USER_DELETED}, 200
+        return {"message": gettext("user_deleted")}, 200
 
 
 class UserLogin(Resource):
@@ -87,13 +80,14 @@ class UserLogin(Resource):
 
         # this is what the `authenticate()` function did in security.py
         if user and safe_str_cmp(user_data.password, user.password):
-            if user.activated:
+            confirmation = user.most_recent_confirmation
+            if confirmation and confirmation.confirmed:
                 # identity is what the identity() function did in security.py—now stored in the JWT
                 access_token = create_access_token(identity=user.id, fresh=True)
                 refresh_token = create_refresh_token(user.id)
                 return {"access_token": access_token, "refresh_token": refresh_token}, 200
-            return {'message': NOT_CONFIRMED_ERROR.format(user.username)}, 400
-        return {"message": INVALID_CREDENTIALS}, 401
+            return {'message': gettext("user_not_confirmed").format(user.username)}, 400
+        return {"message": gettext("user_invalid_credentials")}, 401
 
 
 class UserLogout(Resource):
@@ -103,7 +97,7 @@ class UserLogout(Resource):
         jti = get_raw_jwt()["jti"]  # jti is "JWT ID", a unique identifier for a JWT.
         user_id = get_jwt_identity()
         BLACKLIST.add(jti)
-        return {"message": USER_LOGGED_OUT.format(user_id)}, 200
+        return {"message": gettext("user_logged_out").format(user_id)}, 200
 
 
 class TokenRefresh(Resource):
@@ -113,18 +107,3 @@ class TokenRefresh(Resource):
         current_user = get_jwt_identity()
         new_token = create_access_token(identity=current_user, fresh=False)
         return {"access_token": new_token}, 200
-
-
-class UserConfirm(Resource):
-    @classmethod
-    def get(cls, user_id: int):
-        user = UserModel.find_by_id(user_id)
-        if not user:
-            return {"message": USER_NOT_FOUND}, 404
-
-        user.activated = True
-        user.save_to_db()
-        # return redirect("http://localhost:3000/", code=302)  # redirect if we have a separate web app
-        headers = {"Content-Type": "text/html"}
-        return make_response(render_template("/confirmation_page.html", email=user.username), 200, headers)
-

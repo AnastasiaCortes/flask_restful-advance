@@ -5,17 +5,11 @@ from flask_jwt_extended import JWTManager
 from marshmallow import ValidationError
 from db import db
 from blacklist import BLACKLIST
-from resources.user import (
-    UserRegister,
-    UserLogin,
-    User,
-    TokenRefresh,
-    UserLogout,
-    UserConfirm,
-)
+from resources.user import UserRegister, UserLogin, User, TokenRefresh, UserLogout
 from resources.item import Item, ItemList
 from resources.store import Store, StoreList
 from ma import ma
+from resources.confirmation import Confirmation, ConfirmationByUser
 
 app = Flask(__name__)
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URI")
@@ -34,6 +28,7 @@ api = Api(app)
 def create_tables():
     db.create_all()
 
+
 @app.errorhandler(ValidationError)
 def handle_marshmallow_validation(err):
     return jsonify(err.messages), 400
@@ -46,7 +41,7 @@ jwt = JWTManager(app)
 @jwt.token_in_blacklist_loader
 def check_if_token_in_blacklist(decrypted_token):
     return (
-        decrypted_token["jti"] in BLACKLIST
+            decrypted_token["jti"] in BLACKLIST
     )  # Here we blacklist particular JWTs that have been created in the past.
 
 
@@ -59,7 +54,8 @@ api.add_resource(User, "/user/<int:user_id>")
 api.add_resource(UserLogin, "/login")
 api.add_resource(TokenRefresh, "/refresh")
 api.add_resource(UserLogout, "/logout")
-api.add_resource(UserConfirm, "/user_confirm/<int:user_id>")
+api.add_resource(Confirmation, "/user_confirmation/<string:confirmation_id>")
+api.add_resource(ConfirmationByUser, "/confirmation/user/<int:user_id>")
 
 if __name__ == "__main__":
     db.init_app(app)
